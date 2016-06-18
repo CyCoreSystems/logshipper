@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,9 +34,6 @@ var (
 	// Loghost is the host:port to which the logs should be sent
 	Loghost string
 
-	// Cmd is the handle for the executed command
-	Cmd *exec.Cmd
-
 	log log15.Logger
 )
 
@@ -48,6 +46,8 @@ func init() {
 }
 
 func main() {
+	var retcode int
+
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -59,7 +59,7 @@ func main() {
 
 	err := setDestination(Loghost)
 	if err != nil {
-		log.Crit("failed to set log destination", err)
+		log.Crit("failed to set log destination", "error", err)
 		os.Exit(1)
 	}
 
@@ -79,11 +79,18 @@ func main() {
 	}()
 
 	// Start the downstream command
-	Cmd = exec.Command(Binary, strings.Split(Args, " ")...)
+	args := []string{}
+	if Args != "" {
+		for _, a := range strings.Split(Args, " ") {
+			args = append(args, a)
+		}
+	}
+	cmd := exec.Command(Binary, args...)
 	go func() {
-		err := Exec()
+		err := Exec(cmd)
 		if err != nil {
-			log.Error("Command failed", "error", err)
+			fmt.Println("command failed:", err.Error())
+			retcode = 1
 		}
 		cancel()
 	}()
@@ -92,25 +99,27 @@ func main() {
 
 	// Make sure the downstream process is dead
 	log.Debug("Killing process")
-	Cmd.Process.Kill()
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
 
-	panic("end of process")
+	os.Exit(retcode)
 }
 
 // Exec initializes the state and launches the
 // logshipping subprocess
-func Exec() error {
+func Exec(cmd *exec.Cmd) error {
 	log.Debug("Executing command", "command", Binary, "arguments", Args)
 
 	// Get subprocess pipe
-	stderr, err := Cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
 
 	if err != nil {
 		log.Error("Failed to pipe stderr", "command", Binary, "error", err)
 		return err
 	}
 
-	stdout, err := Cmd.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
 
 	if err != nil {
 		log.Error("Failed to pipe stdout", "command", Binary, "error", err)
@@ -118,7 +127,7 @@ func Exec() error {
 	}
 
 	// Start command in background
-	err = Cmd.Start()
+	err = cmd.Start()
 
 	if err != nil {
 		log.Error("Failed to pipe stdin", "command", Binary, "error", err)
@@ -149,7 +158,7 @@ func Exec() error {
 		}
 	}()
 
-	return Cmd.Wait()
+	return cmd.Wait()
 }
 
 func writeLogEntry(outputPrefix string, channel string, line string) {
